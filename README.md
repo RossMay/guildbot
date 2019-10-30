@@ -1,0 +1,2 @@
+# guildbot
+Discord raid tracking

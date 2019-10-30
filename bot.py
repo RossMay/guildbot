@@ -91,7 +91,8 @@ class dClient(discord.Client):
 					return True
 		return False
 
-	async def add_event_member(self,user_id,message_id):
+	async def add_event_member(self,user_id,message_id,attending=True):
+		print(attending)
 		member = self.memberlist.get(user_id,False)
 		if not member:
 			return False
@@ -99,11 +100,16 @@ class dClient(discord.Client):
 		event_id = self.eventmap.get(message_id,False)
 		if event_id:
 			event = self.eventlist.get(event_id,False)
-			if not user_id in self.eventlist[event_id]['attending']:
+			if (user_id in self.eventlist[event_id]['attending'] and not attending) or (user_id in self.eventlist[event_id]['declined'] and attending):
+				await self.remove_event_member(user_id,message_id,not attending)
+			if not user_id in self.eventlist[event_id]['attending'] and not user_id in self.eventlist[event_id]['declined']:
 				try:
-					cursor.execute("INSERT INTO eventmembers(event_id,discord_id) VALUES (%s, %s)", (event_id,user_id))
+					cursor.execute("INSERT INTO eventmembers(event_id,discord_id,accepted) VALUES (%s, %s, %s)", (event_id,user_id,attending))
 					db.commit()
-					self.eventlist[event_id]['attending'].append(user_id)
+					if attending:
+						self.eventlist[event_id]['attending'].append(user_id)
+					else:
+						self.eventlist[event_id]['declined'].append(user_id)
 					await self.update_event_posting(message_id)
 
 				except Exception as e:
@@ -113,7 +119,7 @@ class dClient(discord.Client):
 					return False
 		return True
 
-	async def remove_event_member(self,user_id,message_id):
+	async def remove_event_member(self,user_id,message_id,add=True):
 		member = self.memberlist.get(user_id,False)
 		if not member:
 			return False
@@ -121,11 +127,14 @@ class dClient(discord.Client):
 		event_id = self.eventmap.get(message_id,False)
 		if event_id:
 			event = self.eventlist.get(event_id,False)
-			if user_id in self.eventlist[event_id]['attending']:
+			if (user_id in self.eventlist[event_id]['attending'] and add) or (user_id in self.eventlist[event_id]['declined'] and not add):
 				try:
 					cursor.execute("DELETE FROM eventmembers WHERE event_id = %s and discord_id = %s", (event_id,user_id))
 					db.commit()
-					self.eventlist[event_id]['attending'].remove(user_id)
+					if user_id in self.eventlist[event_id]['attending']:
+						self.eventlist[event_id]['attending'].remove(user_id)
+					if user_id in self.eventlist[event_id]['declined']:
+						self.eventlist[event_id]['declined'].remove(user_id)
 					await self.update_event_posting(message_id)
 				except Exception as e:
 					print("Database error on eventmember removal")
@@ -167,18 +176,23 @@ class dClient(discord.Client):
 			'tank' : []
 		}
 		declined = []
-		for user in event['attending']:
-			member = self.memberlist.get(user,False)
-			if not member:
-				print("Something up with member %s in event %s" % (user,event))
-			roles[member['charrole']].append(member['name'])
-		for user in event['declined']:
-			member = self.memberlist.get(user,False)
-			if not member:
-				print("Something up with member %s in event %s" % (user,event))
-			declined.append(member['name'])
-#		if full:
-		return ">>> **%s - %s**\n%s - %s EST\n%s hours\n\n%s\n\n**Tanks - %s**\n%s\n\n**Healers - %s**\n%s\n\n**Physical Dps - %s**\n%s\n\n**Caster Dps - %s**\n%s\n\n**Declined - %s**\n%s" % (
+		nrlist = []
+
+		for key in self.memberlist.keys():
+			if self.memberlist[key]['discord_id'] in event['attending']:
+                	        roles[self.memberlist[key]['charrole']].append(self.memberlist[key]['name'])
+			elif self.memberlist[key]['discord_id'] in event['declined']:
+	                        declined.append(self.memberlist[key]['name'])
+			else:
+				nrlist.append(self.memberlist[key]['name'])
+
+		noresponse = ''
+		if full:
+			noresponse = '\n\n**No Response - %s**\n%s' % (
+				len(nrlist),
+                                ', '.join(nrlist) if len(nrlist) else "None")
+
+		return ">>> **%s - %s**\n%s - %s EST\n%s hours\n\n%s\n\n**Tanks - %s**\n%s\n\n**Healers - %s**\n%s\n\n**Physical Dps - %s**\n%s\n\n**Caster Dps - %s**\n%s\n\n**Declined - %s**\n%s%s" % (
 				event['name'],
 				event['id'],
 				start.strftime("%A %B %d at %H:%M"),
@@ -194,10 +208,22 @@ class dClient(discord.Client):
 				len(roles['caster']),
 				', '.join(roles['caster']) if len(roles['caster']) else "None",
 				len(declined),
-				', '.join(declined) if len(declined) else "None")
-#		else:
-#			return ">>> **%s**\n%s - %s EST\n%s hours\n\n%s\n\nTanks: %s\nHealers: %s\nPhysical Dps: %s\nCaster Dps: %s" % (event['name'],start.strftime("%A %B %d at %H:%M"),end.strftime("%H:%M"),event['length'],event['desc'],len(roles['tank']),len(roles['healer']),len(roles['physical']),len(roles['caster']))
+				', '.join(declined) if len(declined) else "None",
+				noresponse)
 
+	async def channel_cleanup(self):
+		channel = self.get_channel(EVENTCHANNEL)
+		counter = 0
+		expired = 0
+		async for message in channel.history(limit=500):
+			if message.author != client.user:
+				await message.delete()
+				counter += 1
+			else:
+				if message.id not in self.eventmap.keys():
+					await message.delete()
+					expired +=1
+		return (counter, expired)
 	# Loops
 	async def on_ready(self):
 		print("Logged in as %s" % self.user)
@@ -207,6 +233,11 @@ class dClient(discord.Client):
 		print("Loading member list")
 		await self.get_members()
 		print("%d members loaded" % len(self.memberlist))
+		deleted, expired = await self.channel_cleanup()
+		if deleted:
+			print("Deleting %d messages by other users in the channel" % deleted)
+		if expired:
+			print("Deleting %d messages that no longer exist" % expired)
 
 	async def server_list(self):
 		await self.wait_until_ready()
@@ -494,15 +525,17 @@ class dClient(discord.Client):
 		return False
 
 	# Reaction handler
-	async def on_raw_reaction_add(self,reactionEvent):
+
+	async def reaction_handler(self,reactionEvent,add=True):
 		if reactionEvent.channel_id == EVENTCHANNEL and reactionEvent.message_id in self.eventmap.keys():
 			channel = self.get_channel(EVENTCHANNEL)
 			message = await channel.fetch_message(reactionEvent.message_id)
 			if reactionEvent.user_id in self.memberlist.keys():
-				if reactionEvent.emoji.name == YESEMOJI:
-					res = await self.add_event_member(reactionEvent.user_id,reactionEvent.message_id)
-				elif reactionEvent.emoji.name == NOEMOJI:
-					res = await self.remove_event_member(reactionEvent.user_id,reactionEvent.message_id)
+				if reactionEvent.emoji.name == YESEMOJI or reactionEvent.emoji.name == NOEMOJI:
+					if add:
+						res = await self.add_event_member(reactionEvent.user_id,reactionEvent.message_id,True if reactionEvent.emoji.name == YESEMOJI else False)
+					else:
+						res = await self.remove_event_member(reactionEvent.user_id,reactionEvent.message_id,True if reactionEvent.emoji.name == YESEMOJI else False)
 
 			event = self.eventmap.get(reactionEvent.message_id,False)
 			if not event:
@@ -519,24 +552,23 @@ class dClient(discord.Client):
 							await reaction.remove(user)
 				if reaction.emoji == NOEMOJI:
 					async for user in reaction.users():
-						if user != self.user:
+						if user != self.user and user.id not in event['declined']:
 							await reaction.remove(user)
 			await message.add_reaction(YESEMOJI)
 			await message.add_reaction(NOEMOJI)
-			print("should have readded")
 
+	async def on_raw_reaction_add(self,reactionEvent):
+		await self.reaction_handler(reactionEvent,True)
 
 	async def on_raw_reaction_remove(self,reactionEvent):
-		if reactionEvent.channel_id == EVENTCHANNEL and reactionEvent.message_id in self.eventmap.keys():
-			channel = self.get_channel(EVENTCHANNEL)
-			if reactionEvent.user_id in self.memberlist.keys():
-				if reactionEvent.emoji.name == YESEMOJI or reactionEvent.emoji.name == NOEMOJI:
-					res = await self.remove_event_member(reactionEvent.user_id,reactionEvent.message_id)
-
+		await self.reaction_handler(reactionEvent,False)
 
 	# Main message handler
 	async def on_message(self,message):
 		if message.author != self.user:
+			if message.channel.id == EVENTCHANNEL:
+				await message.delete()
+				return
 			if message.content.startswith(TRIGGER):
 				textcommand = re.sub(r'%s(\w+).*' % TRIGGER, '\\1', message.content).lower()
 				command = self.commands.get(textcommand,False)
@@ -550,7 +582,7 @@ class dClient(discord.Client):
 
 					msg = await cmd(self,textcommand,message,message.content.replace('%s%s ' % (TRIGGER,textcommand),'').replace('%s%s' % (TRIGGER,textcommand),''))
 					if msg:
-						print(msg)
+						#print(msg)
 						await message.channel.send(msg)
 				else:
 					print("No command found")

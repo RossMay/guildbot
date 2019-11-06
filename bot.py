@@ -11,15 +11,21 @@ import settings
 DEBUG = True
 
 TRIGGER="@"
+STATUS='Napping'
+NAME='NapBot'
 
 ADMINROLE=583043410693324801
+RAIDERROLE=625944404276019220
 
 YESEMOJI='\U00002705'
 NOEMOJI='\U0000274C'
+DELEMOJI='\U0001F4A3'
+REPEATEMOJI='\U0001F501'
 
 RAIDSTART="20:30"
 RAIDEND="23:30"
 EVENTCHANNEL=639111210528407573
+PINGMESSAGE="<@&%s> New raid posted, please sign up here!" % RAIDERROLE
 
 print("Connecting to Mysql %s" % settings.DBNAME)
 db = pymysql.connect(settings.DBHOST,settings.DBUSER,settings.DBPASS,settings.DBNAME)
@@ -39,7 +45,14 @@ class dClient(discord.Client):
 				return True
 		return False
 
+	async def get_event_id(self,discord_id):
+		for key in self.eventlist.keys():
+			if self.eventlist[key]['discord_id'] == discord_id:
+				return key
+
 	async def get_events(self):
+		self.eventlist = {}
+		self.eventmap = {}
 		try:
 			cursor.execute("SELECT id,name,description,date,length,discord_id from events where active=True order by date ASC")
 			data = cursor.fetchall()
@@ -77,6 +90,8 @@ class dClient(discord.Client):
 				self.eventmap[event[5]] = event[0]
 
 		return True
+	async def duplicate_event(self,eventid):
+		return "NOP"
 
 	async def update_event_posting(self,message_id):
 		channel = self.get_channel(EVENTCHANNEL)
@@ -92,7 +107,6 @@ class dClient(discord.Client):
 		return False
 
 	async def add_event_member(self,user_id,message_id,attending=True):
-		print(attending)
 		member = self.memberlist.get(user_id,False)
 		if not member:
 			return False
@@ -145,12 +159,12 @@ class dClient(discord.Client):
 
 	async def get_members(self):
 		try:
-			cursor.execute("SELECT users.id, users.name, users.discord_id, users.discord_name, users.battletag, characters.name, characters.class, characters.role from users inner join characters on users.discord_id = characters.discord_id")
+			cursor.execute("SELECT users.id, users.name, users.discord_id, users.discord_name, users.battletag, characters.name, characters.class, characters.role from users inner join characters on users.discord_id = characters.discord_id order by characters.class, characters.role")
 			data = cursor.fetchall()
 		except Exception as e:
 			print(e)
 			return False
-
+		self.memberlist = {}
 		for member in data:
 			self.memberlist[member[2]] = {
 				'name': member[1],
@@ -163,12 +177,12 @@ class dClient(discord.Client):
 			}
 		return True
 
-	async def format_event(self,event,full=False):
+	async def format_event(self,event,full=False,ping=False):
 		if isinstance(event['date'],datetime.datetime):
 			start = event['date']
 		else:
 			start = datetime.datetime.strptime(event['date'],'%Y-%m-%d %H:%M')
-		end = start + datetime.timedelta(hours=event['length'])
+		#end = start + datetime.timedelta(hours=event['length'])
 		roles = {
 			'physical' : [],
 			'caster' : [],
@@ -192,13 +206,12 @@ class dClient(discord.Client):
 				len(nrlist),
                                 ', '.join(nrlist) if len(nrlist) else "None")
 
-		return ">>> **%s - %s**\n%s - %s EST\n%s hours\n\n%s\n\n**Tanks - %s**\n%s\n\n**Healers - %s**\n%s\n\n**Physical Dps - %s**\n%s\n\n**Caster Dps - %s**\n%s\n\n**Declined - %s**\n%s%s" % (
+		return ">>> **%s%s**\n%s EST\n\n%s\n\n%s**Tanks - %s**\n%s\n\n**Healers - %s**\n%s\n\n**Physical Dps - %s**\n%s\n\n**Caster Dps - %s**\n%s\n\n**Declined - %s**\n%s%s" % (
 				event['name'],
-				event['id'],
+				' - %s' % event['id'] if full else '',
 				start.strftime("%A %B %d at %H:%M"),
-				end.strftime("%H:%M"),
-				event['length'],
 				event['desc'],
+				'%s\n\n' % PINGMESSAGE if ping else '',
 				len(roles['tank']),
 				', '.join(roles['tank']) if len(roles['tank']) else "None",
 				len(roles['healer']),
@@ -226,6 +239,9 @@ class dClient(discord.Client):
 		return (counter, expired)
 	# Loops
 	async def on_ready(self):
+		if STATUS:
+			print("Setting status to %s" % STATUS)
+			await self.change_presence(activity=discord.Game(STATUS))
 		print("Logged in as %s" % self.user)
 		print("Loading event list")
 		await self.get_events()
@@ -245,7 +261,7 @@ class dClient(discord.Client):
 			print("Current servers:")
 			for server in self.guilds:
 				print("\t%s" % server.name)
-			await asyncio.sleep(600)
+			await asyncio.sleep(6000)
 
 	async def event_manager(self):
 		await self.wait_until_ready()
@@ -301,7 +317,9 @@ class dClient(discord.Client):
 	async def list_events(self,command,message,string):
 		msg=''
 		for key,event in self.eventlist.items():
-			msg = "%s%s %s %s %s hours\n" % (msg,event['id'],event['name'],event['date'].strftime("%A %B %d at %H:%M"),event['length'])
+			msg = "%s%s %s %s\n" % (msg,event['id'],event['name'],event['date'].strftime("%A %B %d at %H:%M"))
+		if not len(msg):
+			msg = "No scheduled events."
 		return "```%s```" % msg
 
 	async def get_event(self,command,message,string):
@@ -406,7 +424,37 @@ class dClient(discord.Client):
 
 		return "Done"
 
-	async def get_user(self,command,message,string):
+	async def del_user(self,command,message,string):
+		name = string
+		if not name:
+			return 'Error parsing command values. Check %shelp delmember' % TRIGGER
+
+		try:
+			cursor.execute("SELECT * from users where name=%s", (name,))
+			data = cursor.fetchone()
+		except Exception as e:
+			print(e)
+			return "Database error on lookup"
+
+
+		if data:
+			discord_id = data[3]
+			try:
+				cursor.execute("DELETE FROM eventmembers WHERE discord_id = %s", (discord_id))
+				cursor.execute("DELETE FROM `characters` WHERE discord_id = %s", (discord_id))
+				cursor.execute("DELETE FROM users WHERE discord_id = %s", (discord_id))
+				db.commit()
+			except Exception as e:
+				print(e)
+				db.rollback()
+				return "Database error on deleting user"
+
+		await self.get_members()
+		await self.get_events()
+
+		return "Done"
+
+	async def _get_user(self,command,message,string):
 		discord_id = False
 		if message.mentions and len(message.mentions) == 1:
 			discord_id = message.mentions[0].id
@@ -427,19 +475,71 @@ class dClient(discord.Client):
 			print(e)
 			return "Database error looking up character"
 		if data:
-			return "```\nName:%s\nDiscord Name: %s\nBattletag:%s\n\nCharacter Name:%s\nClass:%s\nRole:%s```" % (data[1],data[2],data[3],data[4],data[5],data[6])
+			return "```\nName: %s\nDiscord Name: %s\n\n\nCharacter Name: %s\nClass: %s\nRole: %s```" % (data[1],data[2],data[4],data[5],data[6])
 
 		return "No matching user found."
 
+	async def del_event(self,command,message,string):
+		p = re.compile(r'(?P<id>[0-9]+)')
+		m = p.search(string)
+		if not m:
+                	return 'Error parsing id value. Check %shelp delevent' % TRIGGER
+
+		event = int(m.group('id'))
+		if event not in self.eventlist.keys():
+			return 'Could not find event %s' % event
+
+		try:
+			cursor.execute("UPDATE events SET active = False WHERE id = %s", (event))
+			db.commit()
+		except Exception as e:
+			print(e)
+			db.rollback()
+			return "Database error on deleting event"
+
+		try:
+			channel = self.get_channel(EVENTCHANNEL)
+			oldmessage = await channel.fetch_message(self.eventlist[event]['discord_id'])
+			await oldmessage.delete()
+		except Exception as e:
+			print(e)
+			print("Error removing event posting for event %s" % event)
+
+		await self.get_events()
+		return "Event %s deleted." % event
+
+	async def noresponse_event(self,command,message,string):
+		p = re.compile(r'(?P<id>[0-9]+)')
+		m = p.search(string)
+		if not m:
+                	return 'Error parsing id value. Check %shelp delevent' % TRIGGER
+
+		event = int(m.group('id'))
+		if event not in self.eventlist.keys():
+			return 'Could not find event %s' % event
+
+		event = self.eventlist[event]
+
+		nrlist = []
+		for key in self.memberlist.keys():
+			if (not self.memberlist[key]['discord_id'] in event['attending']) and (not self.memberlist[key]['discord_id'] in event['declined']):
+				nrlist.append(self.memberlist[key]['name'])
+
+		if len(nrlist):
+			return "```%s people have not responded: %s```" % (len(nrlist),', '.join(nrlist))
+
+		return "```No outstanding responses```"
+
+
 	async def add_event(self,command,message,string):
-		p = re.compile(r'"(?P<name>.+)" (?P<date>[\w\d:\-/]+) (?P<length>[\d\.]+) (?P<desc>.*)')
+		p = re.compile(r'"(?P<name>.+)" (?P<date>[\w\d:\-/]+) (?P<desc>.*)')
 		m = p.search(string)
 		if not m:
 			return 'Error parsing command values. Check %shelp addevent' % TRIGGER
 
 		name = m.group('name')
 		date = m.group('date')
-		length = float(m.group('length'))
+		#length = float(m.group('length'))
 		desc = m.group('desc')
 
 		days = {
@@ -479,28 +579,27 @@ class dClient(discord.Client):
 			except Exception as e:
 				print(e)
 				return "Could not parse start date. Check %shelp adddevent" % TRIGGER
-
-		try:
-			end = start + datetime.timedelta(hours=length)
-		except Exception as e:
-			print(e)
-			return "Could not parse event length. Check %shelp adddevent" % TRIGGER
+		#try:
+		#	end = start + datetime.timedelta(hours=length)
+		#except Exception as e:
+		#	print(e)
+		#	return "Could not parse event length. Check %shelp adddevent" % TRIGGER
 
 		event = {
 			'name': name,
 			'date': start.isoformat(sep=' ',timespec='minutes'),
 			'desc': desc,
-			'length': length,
-			'attending': []
+			'length': 3,
+			'attending': [],
+			'declined': []
 		}
 
-		fevent = await self.format_event(event)
+		fevent = await self.format_event(event,ping=True)
 		channel = self.get_channel(EVENTCHANNEL)
 		message = await channel.send(fevent)
 
-
 		try:
-			cursor.execute("INSERT INTO events(name,date,description,length,discord_id) VALUES (%s, %s, %s, %s, %s)", (name, start.isoformat(sep=' ',timespec='minutes'), desc, length, str(message.id)))
+			cursor.execute("INSERT INTO events(name,date,description,length,discord_id) VALUES (%s, %s, %s, %s, %s)", (name, start.isoformat(sep=' ',timespec='minutes'), desc, 3, str(message.id)))
 			db.commit()
 		except Exception as e:
 			print(e)
@@ -528,14 +627,28 @@ class dClient(discord.Client):
 
 	async def reaction_handler(self,reactionEvent,add=True):
 		if reactionEvent.channel_id == EVENTCHANNEL and reactionEvent.message_id in self.eventmap.keys():
+			server = self.get_guild(reactionEvent.guild_id)
 			channel = self.get_channel(EVENTCHANNEL)
 			message = await channel.fetch_message(reactionEvent.message_id)
-			if reactionEvent.user_id in self.memberlist.keys():
-				if reactionEvent.emoji.name == YESEMOJI or reactionEvent.emoji.name == NOEMOJI:
-					if add:
-						res = await self.add_event_member(reactionEvent.user_id,reactionEvent.message_id,True if reactionEvent.emoji.name == YESEMOJI else False)
-					else:
-						res = await self.remove_event_member(reactionEvent.user_id,reactionEvent.message_id,True if reactionEvent.emoji.name == YESEMOJI else False)
+			user = server.get_member(reactionEvent.user_id)
+			#print(reactionEvent.emoji.name)
+			if add and reactionEvent.emoji.name == DELEMOJI and await self.is_mod(user):
+				eventid = await self.get_event_id(message.id)
+				await self.del_event("",None,"%s" % eventid)
+			elif add and reactionEvent.emoji.name == REPEATEMOJI and await self.is_mod(user):
+				eventid = await self.get_event_id(message.id)
+				#await self.del_event("",None,"%s" % eventid)
+				await self.duplicate_event(eventid)
+			else:
+				if reactionEvent.user_id in self.memberlist.keys():
+					if reactionEvent.emoji.name == YESEMOJI or reactionEvent.emoji.name == NOEMOJI:
+						if add:
+							res = await self.add_event_member(reactionEvent.user_id,reactionEvent.message_id,True if reactionEvent.emoji.name == YESEMOJI else False)
+						else:
+							res = await self.remove_event_member(reactionEvent.user_id,reactionEvent.message_id,True if reactionEvent.emoji.name == YESEMOJI else False)
+				elif add:
+					if user != self.user:
+						await user.send("You are not signed up to raid. Please contact an officer to be added to the raiding list.")
 
 			event = self.eventmap.get(reactionEvent.message_id,False)
 			if not event:
@@ -620,14 +733,22 @@ class dClient(discord.Client):
 			'mod' : True,
 			'function': add_user,
 			'reply': '',
-			'description': 'Add a member to the guild list',
+			'description': 'Add a member to the raid list',
 #			'help' : '%saddmember <Name> <@discord> <battletag> <charactername> <class> <role>\n\nName is just a nickname for identification\nPing their discord to link it\nBattletag can be set to anything if unknown\nClasses: Priest, Warlock, Mage, Hunter, Warrior, Paladin, Rogue, Druid\nRoles: Tank, Healer, Physical, Caster\n\nEx - %saddmember Verris @verris Verris#1318 Verris Priest Healer\n' % (TRIGGER,TRIGGER)
-			'help' : '%saddmember <Name> <@discord> <charactername> <class> <role>\n\nName is just a nickname for identification\nPing their discord to link it\nClasses: Priest, Warlock, Mage, Hunter, Warrior, Paladin, Rogue, Druid\nRoles: Tank, Healer, Physical, Caster\n\nEx - %saddmember Verris @verris Verris Priest Healer\n' % (TRIGGER,TRIGGER)
+			'help' : '%saddmember <Name> <@discord> <charactername> <class> <role>\n\nName is just a nickname for identification\nPing their discord to link it\nClasses: Priest, Warlock, Mage, Hunter, Warrior, Paladin, Rogue, Druid\nRoles: Tank, Healer, Physical, Caster\n\nEx - %saddmember Verris @verris Verris Priest Healer' % (TRIGGER,TRIGGER)
+
+		},
+		'delmember': {
+			'mod' : True,
+			'function': del_user,
+			'reply': '',
+			'description': 'Remove a member from the raid list',
+			'help' : '%saddmember <Name>' % TRIGGER
 
 		},
 		'getmember': {
 			'mod' : True,
-			'function': get_user,
+			'function': _get_user,
 			'reply': '',
 			'description': 'Get a member\'s info from the guild list',
 			'help' : '%saddmember <Name|@discord>' % TRIGGER
@@ -641,12 +762,28 @@ class dClient(discord.Client):
 			'help' : '%slistmembers' % TRIGGER
 
 		},
+		'noresponse': {
+			'mod' : True,
+			'function': noresponse_event,
+			'reply': '',
+			'description': 'List the people who have not responsed to the specified event.',
+			'help' : '%snoresponse <id>' % TRIGGER
+
+		},
+		'delevent': {
+			'mod' : True,
+			'function': del_event,
+			'reply': '',
+			'description': 'Delete an event',
+			'help' : '%sdelevent <id>' % TRIGGER
+
+		},
 		'addevent': {
 			'mod' : True,
 			'function': add_event,
 			'reply': '',
 			'description': 'Add an event to the event list',
-			'help' : '%saddevent "<name>" <date> <length> <description>\n\nEvent name should be in double quotes.\nDate can be a weekday, which it will pick the next of, at the scheduled raid time, or date time in the format of day/month-hour:minute\nLength is in hours\n\nEx - %saddevent "Molten Core" Sunday 3 We\'re going to clear MC this time\n     %saddevent "BWL" 12/11-18:30 4.5 Starting on BWL early at 6:30 this time' % (TRIGGER,TRIGGER,TRIGGER)
+			'help' : '%saddevent "<name>" <date> <description>\n\nEvent name should be in double quotes.\nDate can be a weekday, which it will pick the next of, at the scheduled raid time, or date time in the format of day/month-hour:minute\n\nEx - %saddevent "Molten Core" Sunday We\'re going to clear MC this time\n     %saddevent "BWL" 12/11-18:30 Starting on BWL early at 6:30 this time' % (TRIGGER,TRIGGER,TRIGGER)
 
 		},
 		'fixchannels': {

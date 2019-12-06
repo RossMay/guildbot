@@ -5,6 +5,7 @@ import re
 import datetime
 import redis
 import pickle
+import pytz
 
 import settings
 
@@ -12,6 +13,7 @@ DEBUG = True
 
 TRIGGER="@"
 STATUS='Napping v2.0'
+BOTNAME='NapBot'
 
 ROLES = {
 	'admin' : 583043410693324801,
@@ -46,7 +48,9 @@ EMOJIS = {
 }
 
 CHANNELS = {
-	'event': 639111210528407573
+	'event': 639111210528407573,
+	'nosignup': 648923733091942413,
+	'log': 648924402406129664
 }
 
 SERVER = 582999149474218024
@@ -81,6 +85,16 @@ DEFAULTROLE = {
 class dClient(discord.Client):
 
 	# Helper Functions
+
+	# Log an event to the logging channel
+	async def log(self,message):
+		now = datetime.datetime.now(pytz.timezone("US/Eastern"))
+		try:
+			channel = self.get_channel(CHANNELS['log'])
+			message = await channel.send("[%s] %s" %(now.strftime("%Y-%m-%d-%H:%M:%S"),message))
+		except Exception as e:
+			print("Error logging")
+			print(e)
 
 	# Save to Redis
 	async def save(self):
@@ -141,6 +155,11 @@ class dClient(discord.Client):
 
 		return nrlist
 
+	# Update all postings
+	async def update_all_postings(self):
+		for key in self.eventmap.keys():
+			await self.update_event_posting(key)
+
 
 	# Update the discord posting for an event
 	async def update_event_posting(self,message_id):
@@ -166,8 +185,10 @@ class dClient(discord.Client):
 			if not user_id in self.eventlist[event_id]['attending'] and not user_id in self.eventlist[event_id]['declined']:
 				if attending:
 					self.eventlist[event_id]['attending'].append(user_id)
+					await self.log("Added %s as attending to event %s - #%s" % (self.memberlist[user_id]['name'],event['name'],event_id))
 				else:
 					self.eventlist[event_id]['declined'].append(user_id)
+					await self.log("Added %s as declined to event %s - #%s" % (self.memberlist[user_id]['name'],event['name'],event_id))
 				await self.update_event_posting(message_id)
 				await self.save()
 
@@ -179,8 +200,10 @@ class dClient(discord.Client):
 			if (user_id in self.eventlist[event_id]['attending'] and add) or (user_id in self.eventlist[event_id]['declined'] and not add):
 				if user_id in self.eventlist[event_id]['attending']:
 					self.eventlist[event_id]['attending'].remove(user_id)
+					await self.log("Removed %s as attending from event %s - #%s" % (self.memberlist[user_id]['name'],event['name'],event_id))
 				if user_id in self.eventlist[event_id]['declined']:
 					self.eventlist[event_id]['declined'].remove(user_id)
+					await self.log("Removed %s as declined from event %s - #%s" % (self.memberlist[user_id]['name'],event['name'],event_id))
 				await self.update_event_posting(message_id)
 				await self.save()
 
@@ -213,9 +236,10 @@ class dClient(discord.Client):
 			roles[key].sort(key=self.sort_order)
 		declined.sort(key=self.sort_order)
 
-		noresponse = ''
+		nrlist = await self.get_noresponse_list(event['id'])
+
 		at = len(event['attending'])
-		return ">>> **%s - #%s**\n%s EST\n%s\n\n%s\n\n**Tanks - %s**\n%s\n\n**Healers - %s**\n%s\n\n**Physical Dps - %s**\n%s\n\n**Caster Dps - %s**\n%s\n\n**Declined - %s**\n%s" % (
+		return ">>> **%s - #%s**\n%s EST\n%s\n\n%s\n\n**Tanks - %s**\n%s\n\n**Healers - %s**\n%s\n\n**Physical Dps - %s**\n%s\n\n**Caster Dps - %s**\n%s\n\n**Declined - %s**\n%s\n\n**Awaiting Response - %s**\n%s" % (
 				event['name'],
 				event['id'],
 				start.strftime("%A %B %d at %H:%M"),
@@ -230,7 +254,9 @@ class dClient(discord.Client):
 				len(roles['caster']),
 				', '.join(roles['caster']) if len(roles['caster']) else "None",
 				len(declined),
-				', '.join(declined) if len(declined) else "None")
+				', '.join(declined) if len(declined) else "None",
+				len(nrlist),
+				', '.join(self.memberlist[m]['name'] for m in nrlist) if len(nrlist) else "None")
 
 	# Remove any posts in the event channel that are not made by the bot
 	async def channel_cleanup(self):
@@ -246,12 +272,14 @@ class dClient(discord.Client):
 	async def update_member_name(self,discord_id,name):
 		if not discord_id in self.memberlist.keys():
 			return False
+		await self.log("Updating name for %s to %s" % (self.memberlist[discord_id]['name'],name))
 		self.memberlist[discord_id]['name'] = name
 		await self.save()
 		return True
 
 	# Update a member record
 	async def update_member(self,id,name,m_class,m_spec,new_name=None,save=True):
+		updatePostings = False
 		if new_name:
 			name = new_name
 		else:
@@ -261,7 +289,8 @@ class dClient(discord.Client):
 				name = m.group('name')
 
 		if not id in self.memberlist.keys():
-			print(self.memberlist)
+			await self.log("Adding new raiding member %s - %s, %s, %s" % (name,id,m_class,m_spec))
+			updatePostings = True
 			self.memberlist[id] = {
 				'discord_id': id,
 				'name': name
@@ -272,6 +301,8 @@ class dClient(discord.Client):
 
 		self.memberlist[id]['charclass'] = m_class
 		self.memberlist[id]['charrole'] = m_spec
+		if updatePostings:
+			await self.update_all_postings()
 		if save:
 			await self.save()
 
@@ -304,12 +335,14 @@ class dClient(discord.Client):
 				await self.update_member(member.id,member.display_name,m_class,m_spec,save=False)
 			else:
 				if member.id in self.memberlist.keys():
+					await self.log("Removing raider %s" % self.memberlist[member.id]['name'])
 					for event in self.eventlist:
 						if member.id in self.eventlist[event]['attending']:
 							self.eventlist[event]['attending'].remove(member.id)
 						if member.id in self.eventlist[event]['declined']:
 							self.eventlist[event]['declined'].remove(member.id)
 					del self.memberlist[member.id]
+					await self.update_all_postings()
 		await self.save()
 		if start != len(self.memberlist):
 			print("Updated member list went from %s to %s" % (start, len(self.memberlist)))
@@ -344,6 +377,7 @@ class dClient(discord.Client):
 		deleted = await self.channel_cleanup()
 		if deleted:
 			print("Deleting %d messages by other users in the channel" % deleted)
+		await self.log("%s started. %d event%s loaded, %s members loaded." % (BOTNAME, len(self.eventlist), '' if len(self.eventlist) == 1 else 's' , len(self.memberlist)))
 
 	# Custom function rules
 
@@ -508,6 +542,7 @@ class dClient(discord.Client):
 			print("Error removing event posting for event %s" % key)
 
 		try:
+			await self.log('Deleting event %s - #%s'% (self.eventlist[key]['name'], str(key)))
 			del self.eventmap[self.eventlist[key]['discord_id']]
 		except Exception as e:
 			pass
@@ -561,7 +596,12 @@ class dClient(discord.Client):
 
 		if len(nrlist):
 			for id in nrlist:
-				await message.guild.get_member(id).send(msg)
+				try:
+					await message.guild.get_member(id).send(msg)
+				except Exception as e:
+					print("Failed to notify %s" % message.guild.get_member(id))
+					print(e)
+			await self.log("Notified %s people to respond to %s - #%s" % (len(nrlist),self.eventlist[key]['name'],str(key)))
 			return "%s people have been notifed.\n>>> %s" % (len(nrlist),msg)
 
 		return "There is nobody to notify."
@@ -637,9 +677,10 @@ class dClient(discord.Client):
 		await message.add_reaction(EMOJIS['yes'])
 		await message.add_reaction(EMOJIS['no'])
 		await self.save()
+		await self.log("Added event %s - #%s" % (name, str(id)))
 		return "Event #%s added!" % id
 
-	# Replace any _ with a spcae in channel names
+	# Replace any _ with a space in channel names
 	async def fix_channels(self,command,message,string):
 		for channel in message.guild.channels:
 			if '_' in channel.name:
@@ -669,6 +710,7 @@ class dClient(discord.Client):
 							await self.remove_event_response(reactionEvent.user_id,reactionEvent.message_id,True if reactionEvent.emoji.name == EMOJIS['yes'] else False)
 				elif add:
 					if user != self.user:
+						await self.log("User tried to signup but is not in the raid list - %s" % user.display_name)
 						await user.send("You are not signed up to raid. Please contact an officer to be added to the raiding list.")
 
 			key = self.eventmap.get(reactionEvent.message_id,False)

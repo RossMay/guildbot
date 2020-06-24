@@ -17,7 +17,8 @@ BOTNAME='NapBot'
 
 ROLES = {
 	'admin' : 583043410693324801,
-	'raider': 625944404276019220
+	'raider': 625944404276019220,
+	'lotus' : 710577701131649074
 }
 
 SPECS = {
@@ -50,7 +51,8 @@ EMOJIS = {
 CHANNELS = {
 	'event': 639111210528407573,
 	'nosignup': 648923733091942413,
-	'log': 648924402406129664
+	'log': 648924402406129664,
+	'profession': 585554063966470209
 }
 
 SERVER = 582999149474218024
@@ -239,9 +241,10 @@ class dClient(discord.Client):
 		nrlist = await self.get_noresponse_list(event['id'])
 
 		at = len(event['attending'])
-		return ">>> **%s - #%s**\n%s EST\n%s\n\n%s\n\n**Tanks - %s**\n%s\n\n**Healers - %s**\n%s\n\n**Physical Dps - %s**\n%s\n\n**Caster Dps - %s**\n%s\n\n**Declined - %s**\n%s\n\n**Awaiting Response - %s**\n%s" % (
+		return ">>> **%s - #%s**\n%s\n%s EST\n%s\n\n%s\n\n**Tanks - %s**\n%s\n\n**Healers - %s**\n%s\n\n**Physical Dps - %s**\n%s\n\n**Caster Dps - %s**\n%s\n\n**Declined - %s**\n%s\n\n**Awaiting Response - %s**\n%s" % (
 				event['name'],
 				event['id'],
+				PINGMESSAGE,
 				start.strftime("%A %B %d at %H:%M"),
 				'%s Attendee%s' % (at,'' if at == 1 else 's'),
 				event['desc'],
@@ -313,8 +316,10 @@ class dClient(discord.Client):
 
 		errors = ''
 		start = len(self.memberlist)
+		currentRaiders = []
 		for member in server.members:
 			if await self.has_role(member,server.get_role(ROLES['raider'])):
+				currentRaiders.append(member.id)
 				m_class = None
 				m_spec = None
 				for role in CLASSES:
@@ -335,14 +340,25 @@ class dClient(discord.Client):
 				await self.update_member(member.id,member.display_name,m_class,m_spec,save=False)
 			else:
 				if member.id in self.memberlist.keys():
-					await self.log("Removing raider %s" % self.memberlist[member.id]['name'])
+					await self.log("Removing raider %s (No longer raider)" % self.memberlist[member.id]['name'])
 					for event in self.eventlist:
 						if member.id in self.eventlist[event]['attending']:
 							self.eventlist[event]['attending'].remove(member.id)
 						if member.id in self.eventlist[event]['declined']:
 							self.eventlist[event]['declined'].remove(member.id)
 					del self.memberlist[member.id]
-					await self.update_all_postings()
+
+		for member in list(self.memberlist):
+			if member not in currentRaiders:
+				await self.log("Removing raider %s (No longer in server)" % self.memberlist[member]['name'])
+				for event in self.eventlist:
+					if member in self.eventlist[event]['attending']:
+						self.eventlist[event]['attending'].remove(member)
+					if member in self.eventlist[event]['declined']:
+						self.eventlist[event]['declined'].remove(member)
+				del self.memberlist[member]
+
+		await self.update_all_postings()
 		await self.save()
 		if start != len(self.memberlist):
 			print("Updated member list went from %s to %s" % (start, len(self.memberlist)))
@@ -437,6 +453,26 @@ class dClient(discord.Client):
 		if not len(msg):
 			msg = "No scheduled events."
 		return "```%s```" % msg
+
+	# Change an event name
+	async def set_event_name(self,command,message,string):
+		p = re.compile(r'(?P<id>[0-9]+) (?P<name>.+)')
+		m = p.search(string)
+		if not m:
+               		return 'Error parsing event id value. Check %shelp %s' % (TRIGGER, command)
+
+		key = int(m.group('id'))
+		name = m.group('name')
+		if key not in self.eventlist.keys():
+			return 'Could not find event %s' % key
+
+		if not len(name):
+			return 'Error - New name is required.'
+		await self.log("Changed event #%s name to %s" % (key,name))
+		self.eventlist[key]['name'] = "%s" % name
+		await self.save()
+#		await self.update_event_posting(self.eventmap.get(int(key)))
+		return "Changed event #%s name to %s" % (key,name)
 
 	# Get details for a specific event
 	async def get_event(self,command,message,string):
@@ -668,7 +704,7 @@ class dClient(discord.Client):
 
 		fevent = await self.format_event(self.eventlist[id])
 		channel = self.get_channel(CHANNELS['event'])
-		await channel.send(PINGMESSAGE)
+#		await channel.send(PINGMESSAGE)
 		message = await channel.send(fevent)
 
 		self.eventlist[id]['discord_id'] = message.id
@@ -680,12 +716,58 @@ class dClient(discord.Client):
 		await self.log("Added event %s - #%s" % (name, str(id)))
 		return "Event #%s added!" % id
 
+	# Save a lotus timer
+	async def lotus(self,command,message,string):
+		now = datetime.datetime.now(pytz.timezone("US/Eastern"))
+		p = re.compile(r'(?P<time>[\d:]+)')
+		m = p.search(string)
+		if not m:
+			return 'Error parsing time. Check %shelp lotus' % TRIGGER
+		t = m.group('time').split(':')
+		time = datetime.time(int(t[0]),int(t[1]))
+		start = datetime.datetime.combine(datetime.date.today(), datetime.time(int(t[0]), int(t[1]))) + datetime.timedelta(minutes=45)
+		end = datetime.datetime.combine(datetime.date.today(), datetime.time(int(t[0]), int(t[1]))) + datetime.timedelta(minutes=75)
+
+		try:
+			channel = self.get_channel(CHANNELS['profession'])
+			message = await channel.send("Next lotus window %s - %s" % (start.strftime("%-I:%M"),end.strftime("%-I:%M")))
+			STATUS="Lotus: %s - %s" % (start.strftime("%-I:%M"),end.strftime("%-I:%M"))
+			await self.change_presence(activity=discord.Game(STATUS))
+		except Exception as e:
+			print("Error reporting lotus")
+			print(e)
+		return False
+
+	# Add user to lotus group
+	async def add_lotus(self,command,message,string):
+		try:
+			user = message.author
+			role = user.guild.get_role(ROLES['lotus'])
+			await user.add_roles(role)
+		except Exception as e:
+			print("Error adding lotus group")
+			print(e)
+			return "Error adding role"
+		return "Added %s to lotusgroup." % user
+
+	# Remove user from lotus group
+	async def remove_lotus(self,command,message,string):
+		try:
+			user = message.author
+			role = user.guild.get_role(ROLES['lotus'])
+			await user.remove_roles(role)
+		except Exception as e:
+			print("Error removing lotus group")
+			print(e)
+			return "Error removing role"
+		return "Removed %s from lotusgroup." % user
+
 	# Replace any _ with a space in channel names
 	async def fix_channels(self,command,message,string):
 		for channel in message.guild.channels:
 			if '_' in channel.name:
 				await message.channel.send("Renaming %s to %s" % (channel.name, channel.name.replace('_','\u2009')))
-				await channel.edit(name=channel.name.replace('_','\u2009'))
+				await channel.edit(name=channel.name.replace('_','\u3000'))
 		return False
 
 	# Handle the addition or removal of reactions
@@ -800,6 +882,14 @@ class dClient(discord.Client):
 			'help' : '%slistevents' % TRIGGER
 
 		},
+		'seteventname': {
+			'mod' : True,
+			'function': set_event_name,
+			'reply': '',
+			'description': 'Change an event name',
+			'help' : '%sseteventname <id> <New Event Name>\n\nID is the numeric value given in %slistevents.' % (TRIGGER,TRIGGER)
+
+		},
 		'getevent': {
 			'mod' : True,
 			'function': get_event,
@@ -878,6 +968,30 @@ class dClient(discord.Client):
 			'reply': '',
 			'description': 'Add an event to the event list',
 			'help' : '%saddevent "<name>" <date> <description>\n\nEvent name should be in double quotes.\nDate can be a weekday, which it will pick the next of, at the scheduled raid time, or date time in the format of day/month-hour:minute\n\nEx - %saddevent "Molten Core" Sunday We\'re going to clear MC this time\n     %saddevent "BWL" 12/11-18:30 Starting on BWL early at 6:30 this time' % (TRIGGER,TRIGGER,TRIGGER)
+
+		},
+		'lotus': {
+			'mod' : False,
+			'function': lotus,
+			'reply': '',
+			'description': 'Mark a timer for the silithus lotus.',
+			'help' : '%slotus\n\nSet the timer for a silithus lotus.\n\nEx - %slotus 1:55' % (TRIGGER,TRIGGER)
+
+		},
+		'flower': {
+			'mod' : False,
+			'function': add_lotus,
+			'reply': '',
+			'description': 'Add yourself to the lotus ping role.',
+			'help' : '%sflower\n\nAdd yourself to the lotus ping group' % TRIGGER
+
+		},
+		'deflower': {
+			'mod' : False,
+			'function': remove_lotus,
+			'reply': '',
+			'description': 'Remove yourself from the lotus ping role.',
+			'help' : '%sdeflower\n\nRemove yourself from the lotus ping group' % TRIGGER
 
 		},
 		'fixchannels': {

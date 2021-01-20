@@ -317,6 +317,7 @@ class dClient(discord.Client):
 		errors = ''
 		start = len(self.memberlist)
 		currentRaiders = []
+		print("Members: %s" % server.members)
 		for member in server.members:
 			if await self.has_role(member,server.get_role(ROLES['raider'])):
 				currentRaiders.append(member.id)
@@ -350,7 +351,7 @@ class dClient(discord.Client):
 
 		for member in list(self.memberlist):
 			if member not in currentRaiders:
-				await self.log("Removing raider %s (No longer in server)" % self.memberlist[member]['name'])
+				await self.log("Removing raider %s (No longer raider)" % self.memberlist[member]['name'])
 				for event in self.eventlist:
 					if member in self.eventlist[event]['attending']:
 						self.eventlist[event]['attending'].remove(member)
@@ -567,7 +568,7 @@ class dClient(discord.Client):
 
 		key = int(m.group('id'))
 		if key not in self.eventlist.keys():
-			return 'Could not find event %s' % event
+			return 'Could not find event %s' % key
 
 		try:
 			channel = self.get_channel(CHANNELS['event'])
@@ -1037,9 +1038,10 @@ class dClient(discord.Client):
 	}
 
 
-
+intents = discord.Intents.default()
+intents.members = True
 db = redis.StrictRedis(REDIS['host'])
-client = dClient()
+client = dClient(intents=intents)
 client.loop.create_task(client.server_list())
 client.run(settings.TOKEN)
 db.close()
